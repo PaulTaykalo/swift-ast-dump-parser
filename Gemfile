@@ -2,4 +2,4 @@ source 'https://rubygems.org'
 
 gem 'rake'
 gem 'minitest'
-gem 'coveralls', require: false
+gem 'codecov', :require => false, :group => :test
