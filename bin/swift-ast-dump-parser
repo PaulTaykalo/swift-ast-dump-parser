@@ -1,0 +1,8 @@
+#!/usr/bin/env ruby
+# encoding: UTF-8
+
+require 'swift_ast_dump_parser'
+
+ast_path = ARGV[0]
+@tree = SwiftAST::Parser.new().parse_build_log_output(File.read(ast_path))
+@tree.dump
