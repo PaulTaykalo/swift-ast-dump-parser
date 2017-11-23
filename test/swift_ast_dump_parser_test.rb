@@ -281,21 +281,6 @@ class SwiftAstParserTest < Minitest::Test
     
   end
 
-  def test_unlcosed_elements
-    source = %{
-(source_file\
-    (statement param1 param2\
-       (unclosed_statement param3 param4))
-(source_file\
-  (if_stmt implicit\
-    (statement)
-    (statemen2)))
-    }
-    ast = SwiftAST::Parser.new.parse_build_log_output(source)
-    assert_equal ast.name, 'ast'
-    assert_equal 2, ast.children.count
-  end
-
   def test_hashtags_in_elements_names
     source = %{
       (#if_decl

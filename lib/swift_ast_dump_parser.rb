@@ -1,3 +1,12 @@
+module Tokens
+  SINGLE_QUOTE = "'".freeze
+  DOUBLE_QUOTE = '"'.freeze
+  LT = "<".freeze
+  GT = ">".freeze
+  NEWLINE = "\n".freeze
+  BRACKET_OPEN = "(".freeze
+  BRACKET_CLOSE = ")".freeze
+end
 module SwiftAST
   autoload :StringScanner, 'strscan'
   class Parser 
@@ -19,56 +28,40 @@ module SwiftAST
     end 
 
 
+    private
+
     def scan_parameters
       parameters = []
 
       while true
         @scanner.skip(/\s*/)
-        parameter = scan_parameter?
-        break unless parameter
+        break unless parameter = scan_parameter?
         parameters << parameter
       end
 
       parameters
     end  
 
-    def scan_parameters_from_types
-      first_param = @scanner.scan(/\d+:/)
-      return [] unless first_param
-      return [first_param] + scan_parameters
-    end  
-
-    def scan_children(level = 0)
+    def scan_children
       children = []
-      while true
-        return children unless whitespaces = whitespaces_at(level)
-        node_name = scan_name?
-        return children if node_name == "source_file" && level != 0 && unscan(node_name + whitespaces)
-        node_parameters = scan_parameters
+      while scan_opening_bracket
 
-        node_children = scan_children(level + 1)
+        children << Node.new(scan_name?, scan_parameters, scan_children)
 
-        while next_params = scan_parameters_from_types  # these are stupid params alike
-          break if next_params.empty?
-          node_parameters += next_params
-          node_children += scan_children(level + 1)
-        end  
-        node = Node.new(node_name, node_parameters, node_children)
+        scan_closing_bracket
+        @scanner.scan(/[\w\s]*/)
 
-        children << node
-        @scanner.scan(/(\s|\\|\n|\r|\t)*\)[\w\s]*/)
-      end  
+      end
+
       children
     end  
 
-    def whitespaces_at(level = 0)
-      whitespaces = @scanner.scan(/(\s|\\|\n|\r|\t)*\(/)
-      if level == 0 && whitespaces.nil?
-         whitespaces = @scanner.scan(/.*?\(source_file/m)
-         return nil unless whitespaces
-         unscan("source_file")
-      end
-      whitespaces 
+    def scan_opening_bracket
+      @scanner.scan(/(\s|\\|\n|\r|\t)*\(/)
+    end 
+
+    def scan_closing_bracket
+      @scanner.scan(/(\s|\\|\n|\r|\t)*\)/)
     end  
 
     def unscan(string)
@@ -80,6 +73,10 @@ module SwiftAST
       el_name
     end  
 
+    def next_parameter_if_any(is_parsing_rvalue = false)
+      scan_parameter?(is_parsing_rvalue) || ""
+    end  
+
     def scan_parameter?(is_parsing_rvalue = false)
       #white spaces are skipped
 
@@ -89,9 +86,10 @@ module SwiftAST
       prefix = @scanner.scan(/[^\s()'"\[\\]+/) if is_parsing_rvalue
       prefix = @scanner.scan(/[^\s()<'"\[\\=]+/) unless is_parsing_rvalue
 
-      next_char = @scanner.peek(1)
-      return nil unless next_char
+      return nil unless next_char = @scanner.peek(1) 
       should_unwrap_strings = !is_parsing_rvalue && !prefix
+
+      non_nil_prefix = prefix || ""
 
       case next_char
       when " "   # next parameter
@@ -100,39 +98,42 @@ module SwiftAST
         @scanner.scan(/./)
         result = prefix
 
-      when "\n"   # next parameter
+      when Tokens::NEWLINE   # next parameter
         result = prefix
-      when ")"   # closing bracket == end of element
+
+      when Tokens::BRACKET_CLOSE   # closing bracket == end of element
         result = prefix
-      when "\""  # doube quoted string 
-        result = @scanner.scan(/./) + @scanner.scan_until(/"/)
-        result = result[1..-2] if should_unwrap_strings             
-        result = (prefix || "") + result
-      when "'"  # single quoted string 
-        result =  @scanner.scan(/./) + @scanner.scan_until(/'/)
-        result = result[1..-2] if should_unwrap_strings             
-        result = (prefix || "") + result + (scan_parameter?(is_parsing_rvalue) || "")
-      when "<"  # kinda generic
-        result = (prefix || "") + @scanner.scan(/./)
-        #in some cases this can be last char, just because we can end up with a=sdsd.function.< 
-        result += @scanner.scan_until(/>/) + (scan_parameter?(is_parsing_rvalue) || "") 
-      when "("
+
+      when Tokens::DOUBLE_QUOTE  # doube quoted string 
+        result = scan_between(Tokens::DOUBLE_QUOTE, Tokens::DOUBLE_QUOTE, { :unwrap => should_unwrap_strings})
+
+      when Tokens::SINGLE_QUOTE  # single quoted string 
+        result = scan_between(Tokens::SINGLE_QUOTE, Tokens::SINGLE_QUOTE, { :unwrap => should_unwrap_strings})
+        result += next_parameter_if_any(is_parsing_rvalue)
+
+      when Tokens::LT  # kinda generic
+        result = scan_between(Tokens::LT, Tokens::GT)
+
+      when Tokens::BRACKET_OPEN
         #rare case for enums in type (EnumType).enumValue
-        if !prefix && @scanner.check(/\([\w\s\(\)<>,:\]\[\.?]+\)\.\w+/)
-          return @scanner.scan(/\([\w\s\(\)<>,:\]\[\.?]+\)\.\w+/)
+        if !prefix
+          enum_value = scan_enum_value?
+          return enum_value unless enum_value.nil?
         end  
 
+        #nil as parameter - it's probably start of next element
         return nil if !prefix && !is_parsing_rvalue
-        result = (prefix || "") + @scanner.scan_until(/\)/) + (scan_parameter?(is_parsing_rvalue) || "")
-       when "["
-        result = (prefix || "") + scan_range + (scan_parameter?(is_parsing_rvalue) || "")
+
+        result = non_nil_prefix + @scanner.scan_until(/\)/) + next_parameter_if_any(is_parsing_rvalue)
+      when "["
+        result = scan_range + next_parameter_if_any(is_parsing_rvalue)
+
         #rare case for tuple_shuffle_expr [with ([ProductDict], UserDict)]0: ([ProductDict], UserDict)
         if result.start_with?("[with") && result.end_with?("]0:")
-          result = result + @scanner.scan_until(/\n/).chomp("\n")
-
+          result +=  @scanner.scan_until(/\n/).chomp("\n")
         end  
-       when "=" 
-        result = prefix + @scanner.scan(/./) + (scan_parameter?(true) || "")
+      when "=" 
+        result = prefix + @scanner.scan(/./) + next_parameter_if_any(true)
 
       end  
 
@@ -140,36 +141,27 @@ module SwiftAST
 
     end
 
+    def scan_between(left, right, options = {})
+      s = @scanner.scan(/#{left}[^#{right}]*#{right}/)
+      return s[1..-2] if options[:unwrap]
+      return s
+    end  
+
+    def scan_enum_value?
+      #rare case for parameters with enums in type (EnumType).enumValue
+      @scanner.scan(/\([\w\s\(\)<>,:\]\[\.?]+\)\.\w+/)
+    end  
+
     def scan_range
-      return unless @scanner.peek(1) == "["
-      result = @scanner.scan(/./)
+      return unless result = @scanner.scan(/\[/)
 
       while true
         inside = @scanner.scan(/[^\]\[]+/)  #everything but [ or ]
         result += inside || ""
-        next_char = @scanner.peek(1)
-
-        return result + @scanner.scan(/./) if next_char == "]" # we found the end
-        result += scan_range if next_char == "["
-        raise "Unexpected character #{next_char} - [ or ] expected" if next_char != "[" && next_char != "]"
+        return result + "]" if @scanner.scan(/\]/) # we found the end
+        result += scan_range  # Inner ranges are allowed as well, we'll use recursive call
       end
-
     end  
-
-    def scan_line_and_column
-      @scanner.scan(/:\d+:\d+/)
-    end  
-
-    def isalpha(str)
-      !str.match(/[^A-Za-z@_]/)
-    end
-    def isAlphaDigit(str)
-      !str.match(/[^A-Za-z@_0-9]/)
-    end  
-    def isalphaOrDot(str)
-      !str.match(/[^A-Za-z@_.,]/)
-    end
-
 
   end
 
@@ -201,24 +193,6 @@ module SwiftAST
       @children.each { |child| child.dump(level + 1) }
     end  
 
-    def find_nodes(type)
-      found_nodes = []
-      @children.each { |child| 
-        if child.name == type
-           found_nodes << child
-        else
-           found_nodes += child.find_nodes(type)
-        end      
-      }
-      found_nodes
-    end  
-
-    def on_node(type, &block)
-      @children.each { |child|
-        yield child if child.name == type
-        child.on_node(type, &block)
-      }
-    end
 
   end      
 
